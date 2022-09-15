@@ -188,41 +188,42 @@ impl Cmd {
         ledger_info.sequence_number += 1;
         ledger_info.timestamp += 5;
         h.set_ledger_info(ledger_info.clone());
+        {
+            let vm = Vm::new(&h, contract_id.into(), &contents)?;
+            let inputs = match contractspec::function_spec(&vm, &self.function) {
+                Some(s) => s.inputs,
+                None => {
+                    return Err(Error::FunctionNotFoundInContractSpec(self.function.clone()));
+                }
+            };
 
-        let vm = Vm::new(&h, contract_id.into(), &contents)?;
-        let inputs = match contractspec::function_spec(&vm, &self.function) {
-            Some(s) => s.inputs,
-            None => {
-                return Err(Error::FunctionNotFoundInContractSpec(self.function.clone()));
-            }
-        };
+            let parsed_args = self.parse_args(matches, &inputs)?;
 
-        let parsed_args = self.parse_args(matches, &inputs)?;
+            let mut complete_args = vec![
+                ScVal::Object(Some(ScObject::Bytes(contract_id.try_into().unwrap()))),
+                ScVal::Symbol(
+                    (&self.function)
+                        .try_into()
+                        .map_err(|_| Error::FunctionNameTooLong(self.function.clone()))?,
+                ),
+            ];
+            complete_args.extend_from_slice(parsed_args.as_slice());
+            let complete_args_len = complete_args.len();
 
-        let mut complete_args = vec![
-            ScVal::Object(Some(ScObject::Bytes(contract_id.try_into().unwrap()))),
-            ScVal::Symbol(
-                (&self.function)
+            let final_args =
+                complete_args
                     .try_into()
-                    .map_err(|_| Error::FunctionNameTooLong(self.function.clone()))?,
-            ),
-        ];
-        complete_args.extend_from_slice(parsed_args.as_slice());
-        let complete_args_len = complete_args.len();
-
-        let final_args =
-            complete_args
-                .try_into()
-                .map_err(|_| Error::MaxNumberOfArgumentsReached {
-                    current: complete_args_len,
-                    maximum: soroban_env_host::xdr::ScVec::default().max_len(),
-                })?;
-        let res = h.invoke_function(HostFunction::Call, final_args)?;
-        let res_str = strval::to_string(&res).map_err(|e| Error::CannotPrintResult {
-            result: res,
-            error: e,
-        })?;
-        println!("{}", res_str);
+                    .map_err(|_| Error::MaxNumberOfArgumentsReached {
+                        current: complete_args_len,
+                        maximum: soroban_env_host::xdr::ScVec::default().max_len(),
+                    })?;
+            let res = h.invoke_function(HostFunction::Call, final_args)?;
+            let res_str = strval::to_string(&res).map_err(|e| Error::CannotPrintResult {
+                result: res,
+                error: e,
+            })?;
+            println!("{}", res_str);
+        }
 
         let (storage, budget, events) = h.try_finish().map_err(|_h| {
             HostError::from(ScStatus::HostStorageError(
