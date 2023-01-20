@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"math/rand"
-	"os"
 	"path"
 	"sync"
 	"testing"
@@ -17,11 +16,7 @@ import (
 )
 
 func TestGoldenPath(t *testing.T) {
-	db, dbPath := NewTestDB()
-	defer func() {
-		assert.NoError(t, db.Close())
-		assert.NoError(t, os.Remove(dbPath))
-	}()
+	db := NewTestDB(t)
 
 	// Check that we get an empty DB error
 	_, err := db.GetLatestLedgerSequence()
@@ -101,11 +96,7 @@ func TestGoldenPath(t *testing.T) {
 }
 
 func TestDeleteNonExistentLedgerEmpty(t *testing.T) {
-	db, dbPath := NewTestDB()
-	defer func() {
-		assert.NoError(t, db.Close())
-		assert.NoError(t, os.Remove(dbPath))
-	}()
+	db := NewTestDB(t)
 
 	// Simulate a ledger which creates and deletes a ledger entry
 	// which would result in trying to delete a ledger entry which isn't there
@@ -166,11 +157,7 @@ func getContractDataLedgerEntry(data xdr.ContractDataEntry) (xdr.LedgerKey, xdr.
 // Make sure that (multiple, simultaneous) read transactions can happen while a write-transaction is ongoing,
 // and write is only visible once the transaction is committed
 func TestReadTxsDuringWriteTx(t *testing.T) {
-	db, dbPath := NewTestDB()
-	defer func() {
-		assert.NoError(t, db.Close())
-		assert.NoError(t, os.Remove(dbPath))
-	}()
+	db := NewTestDB(t)
 
 	// Check that we get an empty DB error
 	_, err := db.GetLatestLedgerSequence()
@@ -237,11 +224,7 @@ func TestReadTxsDuringWriteTx(t *testing.T) {
 // Make sure that a write transaction can happen while multiple read transactions are ongoing,
 // and write is only visible once the transaction is committed
 func TestWriteTxsDuringReadTxs(t *testing.T) {
-	db, dbPath := NewTestDB()
-	defer func() {
-		assert.NoError(t, db.Close())
-		assert.NoError(t, os.Remove(dbPath))
-	}()
+	db := NewTestDB(t)
 
 	// Check that we get an empty DB error
 	_, err := db.GetLatestLedgerSequence()
@@ -320,17 +303,7 @@ func TestWriteTxsDuringReadTxs(t *testing.T) {
 
 // Check that we can have coexisting reader and writer goroutines without deadlocks or errors
 func TestConcurrentReadersAndWriter(t *testing.T) {
-	db, dbPath := NewTestDB()
-	defer func() {
-		err := db.Close()
-		if err != nil {
-			panic(err)
-		}
-		err = os.Remove(dbPath)
-		if err != nil {
-			panic(err)
-		}
-	}()
+	db := NewTestDB(t)
 	contractID := xdr.Hash{0xca, 0xfe}
 	done := make(chan struct{})
 	var wg sync.WaitGroup
@@ -410,17 +383,7 @@ func TestConcurrentReadersAndWriter(t *testing.T) {
 }
 
 func BenchmarkLedgerUpdate(b *testing.B) {
-	db, dbPath := NewTestDB()
-	defer func() {
-		err := db.Close()
-		if err != nil {
-			panic(err)
-		}
-		err = os.Remove(dbPath)
-		if err != nil {
-			panic(err)
-		}
-	}()
+	db := NewTestDB(b)
 	keyUint32 := xdr.Uint32(0)
 	data := xdr.ContractDataEntry{
 		ContractId: xdr.Hash{0xca, 0xfe},
@@ -454,11 +417,15 @@ func BenchmarkLedgerUpdate(b *testing.B) {
 	b.StopTimer()
 }
 
-func NewTestDB() (DB, string) {
-	dbPath := path.Join(os.TempDir(), fmt.Sprintf("%08x.sqlite", rand.Int63()))
-	db, err := OpenSQLiteDB(dbPath)
+func NewTestDB(tb testing.TB) DB {
+	db, err := OpenSQLiteDB(path.Join(tb.TempDir(), "test.sqlite"))
 	if err != nil {
-		panic(err)
+		tb.Fatalf("cannot open db %v", err)
 	}
-	return db, dbPath
+	tb.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			tb.Fatalf("cannot close db %v", err)
+		}
+	})
+	return db
 }
