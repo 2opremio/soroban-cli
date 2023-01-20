@@ -44,7 +44,7 @@ type sqlDB struct {
 }
 
 func OpenSQLiteDB(dbFilePath string) (DB, error) {
-	db, err := sqlx.Open("sqlite3", fmt.Sprintf("file:%s?_journal_mode=WAL", dbFilePath))
+	db, err := sqlx.Open("sqlite3", fmt.Sprintf("file:%s?_journal_mode=WAL&_synchronous=NORMAL", dbFilePath))
 	if err != nil {
 		return nil, errors.Wrap(err, "open failed")
 	}
@@ -115,15 +115,6 @@ func getLatestLedgerSequence(tx *sqlx.Tx) (uint32, error) {
 	return uint32(latestLedger), nil
 }
 
-func upsertLatestLedgerSequence(tx *sqlx.Tx, sequence uint32) error {
-	sqlStr, args, err := sq.Replace(metaTableName).Values(latestLedgerSequenceMetaKey, fmt.Sprintf("%d", sequence)).ToSql()
-	if err != nil {
-		return err
-	}
-	_, err = tx.Exec(sqlStr, args...)
-	return err
-}
-
 func (s *sqlDB) GetLatestLedgerSequence() (uint32, error) {
 	opts := sql.TxOptions{
 		ReadOnly: true,
@@ -132,15 +123,8 @@ func (s *sqlDB) GetLatestLedgerSequence() (uint32, error) {
 	if err != nil {
 		return 0, err
 	}
-	ret, err := getLatestLedgerSequence(tx)
-	if err != nil {
-		_ = tx.Rollback()
-		return 0, err
-	}
-	if err := tx.Commit(); err != nil {
-		return 0, err
-	}
-	return ret, nil
+	defer tx.Rollback()
+	return getLatestLedgerSequence(tx)
 }
 
 func (s *sqlDB) GetLedgerEntry(key xdr.LedgerKey) (xdr.LedgerEntry, bool, uint32, error) {
@@ -151,24 +135,18 @@ func (s *sqlDB) GetLedgerEntry(key xdr.LedgerKey) (xdr.LedgerEntry, bool, uint32
 	if err != nil {
 		return xdr.LedgerEntry{}, false, 0, err
 	}
+	defer tx.Rollback()
+
 	seq, err := getLatestLedgerSequence(tx)
 	if err != nil {
-		_ = tx.Rollback()
 		return xdr.LedgerEntry{}, false, 0, err
 	}
 	buffer := xdr.NewEncodingBuffer()
 	entry, err := getLedgerEntry(tx, buffer, key)
 	if err == sql.ErrNoRows {
-		if err = tx.Commit(); err != nil {
-			return xdr.LedgerEntry{}, false, 0, err
-		}
 		return xdr.LedgerEntry{}, false, seq, nil
 	}
 	if err != nil {
-		_ = tx.Rollback()
-		return xdr.LedgerEntry{}, false, seq, err
-	}
-	if err := tx.Commit(); err != nil {
 		return xdr.LedgerEntry{}, false, seq, err
 	}
 	return entry, true, seq, nil
@@ -195,19 +173,22 @@ func (s *sqlDB) NewLedgerEntryUpdaterTx(forLedgerSequence uint32, maxBatchSize i
 	if err != nil {
 		return nil, err
 	}
-	ret := &ledgerUpdaterTx{
+	return &ledgerUpdaterTx{
 		maxBatchSize:      maxBatchSize,
 		tx:                tx,
 		forLedgerSequence: forLedgerSequence,
 		buffer:            xdr.NewEncodingBuffer(),
 		keyToEntryBatch:   make(map[string]*string, maxBatchSize),
-	}
-	ret.stmtCache = sq.NewStmtCache(tx)
-	return ret, nil
+		stmtCache:         sq.NewStmtCache(tx),
+	}, nil
 }
 
 func (l *ledgerUpdaterTx) PrepareContext(ctx context.Context, query string) (*sql.Stmt, error) {
-	return l.tx.PrepareContext(ctx, query)
+	stmt, err := l.tx.PrepareContext(ctx, query)
+	if err != nil {
+		l.tx.Rollback()
+	}
+	return stmt, err
 }
 
 func (l *ledgerUpdaterTx) flushLedgerEntryBatch() error {
@@ -238,7 +219,7 @@ func (l *ledgerUpdaterTx) flushLedgerEntryBatch() error {
 	return nil
 }
 
-func (l *ledgerUpdaterTx) UpsertLedgerEntry(key xdr.LedgerKey, entry xdr.LedgerEntry) error {
+func (l *ledgerUpdaterTx) upsertLedgerEntry(key xdr.LedgerKey, entry xdr.LedgerEntry) error {
 	encodedKey, err := encodeLedgerKey(l.buffer, key)
 	if err != nil {
 		return err
@@ -252,7 +233,30 @@ func (l *ledgerUpdaterTx) UpsertLedgerEntry(key xdr.LedgerKey, entry xdr.LedgerE
 	l.keyToEntryBatch[encodedKey] = &encodedEntryStr
 	if len(l.keyToEntryBatch) >= l.maxBatchSize {
 		if err := l.flushLedgerEntryBatch(); err != nil {
-			_ = l.tx.Rollback()
+			return err
+		}
+		// reset map
+		l.keyToEntryBatch = make(map[string]*string, maxBatchSize)
+	}
+	return nil
+}
+
+func (l *ledgerUpdaterTx) UpsertLedgerEntry(key xdr.LedgerKey, entry xdr.LedgerEntry) error {
+	err := l.upsertLedgerEntry(key, entry)
+	if err != nil {
+		_ = l.tx.Rollback()
+	}
+	return err
+}
+
+func (l *ledgerUpdaterTx) deleteLedgerEntry(key xdr.LedgerKey) error {
+	encodedKey, err := encodeLedgerKey(l.buffer, key)
+	if err != nil {
+		return err
+	}
+	l.keyToEntryBatch[encodedKey] = nil
+	if len(l.keyToEntryBatch) > l.maxBatchSize {
+		if err := l.flushLedgerEntryBatch(); err != nil {
 			return err
 		}
 		// reset map
@@ -262,28 +266,28 @@ func (l *ledgerUpdaterTx) UpsertLedgerEntry(key xdr.LedgerKey, entry xdr.LedgerE
 }
 
 func (l *ledgerUpdaterTx) DeleteLedgerEntry(key xdr.LedgerKey) error {
-	encodedKey, err := encodeLedgerKey(l.buffer, key)
+	err := l.deleteLedgerEntry(key)
+	if err != nil {
+		_ = l.tx.Rollback()
+	}
+	return err
+}
+
+func (l *ledgerUpdaterTx) upsertLatestLedgerSequence() error {
+	sqlStr, args, err := sq.Replace(metaTableName).Values(latestLedgerSequenceMetaKey, fmt.Sprintf("%d", l.forLedgerSequence)).ToSql()
 	if err != nil {
 		return err
 	}
-	l.keyToEntryBatch[encodedKey] = nil
-	if len(l.keyToEntryBatch) > l.maxBatchSize {
-		if err := l.flushLedgerEntryBatch(); err != nil {
-			_ = l.tx.Rollback()
-			return err
-		}
-		// reset map
-		l.keyToEntryBatch = make(map[string]*string, maxBatchSize)
-	}
-	return nil
+	_, err = l.tx.Exec(sqlStr, args...)
+	return err
 }
 
 func (l *ledgerUpdaterTx) Done() error {
+	defer l.tx.Rollback()
 	if err := l.flushLedgerEntryBatch(); err != nil {
-		_ = l.tx.Rollback()
 		return err
 	}
-	if err := upsertLatestLedgerSequence(l.tx, l.forLedgerSequence); err != nil {
+	if err := l.upsertLatestLedgerSequence(); err != nil {
 		return err
 	}
 	return l.tx.Commit()
