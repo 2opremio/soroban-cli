@@ -154,14 +154,14 @@ var mockLedgerEntriesWithoutExpirations = []xdr.LedgerEntry{
 		Data: xdr.LedgerEntryData{
 			Type: xdr.LedgerEntryTypeConfigSetting,
 			ConfigSetting: &xdr.ConfigSettingEntry{
-				ConfigSettingId: xdr.ConfigSettingIdConfigSettingStateExpiration,
-				StateExpirationSettings: &xdr.StateExpirationSettings{
-					MaxEntryExpiration:             100,
-					MinTempEntryExpiration:         100,
-					MinPersistentEntryExpiration:   100,
+				ConfigSettingId: xdr.ConfigSettingIdConfigSettingStateArchival,
+				StateArchivalSettings: &xdr.StateArchivalSettings{
+					MaxEntryTtl:                    100,
+					MinTemporaryTtl:                100,
+					MinPersistentTtl:               100,
 					PersistentRentRateDenominator:  100,
 					TempRentRateDenominator:        100,
-					MaxEntriesToExpire:             100,
+					MaxEntriesToArchive:            100,
 					BucketListSizeWindowSampleSize: 100,
 					EvictionScanSize:               100,
 				},
@@ -210,11 +210,11 @@ var mockLedgerEntries = func() []xdr.LedgerEntry {
 			expirationEntry := xdr.LedgerEntry{
 				LastModifiedLedgerSeq: entry.LastModifiedLedgerSeq,
 				Data: xdr.LedgerEntryData{
-					Type: xdr.LedgerEntryTypeExpiration,
-					Expiration: &xdr.ExpirationEntry{
+					Type: xdr.LedgerEntryTypeTtl,
+					Ttl: &xdr.TtlEntry{
 						KeyHash: sha256.Sum256(bin),
-						// Make sure it doesn't expire
-						ExpirationLedgerSeq: 1000,
+						// Make sure it doesn't ttl
+						LiveUntilLedgerSeq: 1000,
 					},
 				},
 			}

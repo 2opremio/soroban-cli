@@ -17,10 +17,11 @@ import (
 	"github.com/stellar/go/strkey"
 	"github.com/stellar/go/txnbuild"
 	"github.com/stellar/go/xdr"
-	"github.com/stellar/soroban-tools/cmd/soroban-rpc/internal/methods"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gotest.tools/v3/icmd"
+
+	"github.com/stellar/soroban-tools/cmd/soroban-rpc/internal/methods"
 )
 
 func cargoTest(t *testing.T, name string) {
@@ -218,7 +219,7 @@ func TestCLIRestore(t *testing.T) {
 	assert.Equal(t, fmt.Sprintf("New expiration ledger: %d", newExpirationSeq), restoreOutput)
 
 	// test to see that we get an error when requesting the expiration ledger entry explicitly.
-	ledgerExpirationEntry := getExpirationKey(t, getCounterLedgerKey(parseContractStrKey(t, strkeyContractID)))
+	ledgerExpirationEntry := getTtlKey(t, getCounterLedgerKey(parseContractStrKey(t, strkeyContractID)))
 	ledgerExpirationEntryB64, err := xdr.MarshalBase64(ledgerExpirationEntry)
 	require.NoError(t, err)
 	var getLedgerEntryResult methods.GetLedgerEntryResponse
@@ -237,13 +238,13 @@ func TestCLIRestore(t *testing.T) {
 	require.Contains(t, err.Error(), methods.ErrLedgerExpirationEntriesCannotBeQueriedDirectly)
 }
 
-func getExpirationKey(t *testing.T, key xdr.LedgerKey) xdr.LedgerKey {
+func getTtlKey(t *testing.T, key xdr.LedgerKey) xdr.LedgerKey {
 	assert.True(t, key.Type == xdr.LedgerEntryTypeContractCode || key.Type == xdr.LedgerEntryTypeContractData)
 	binKey, err := key.MarshalBinary()
 	assert.NoError(t, err)
 	return xdr.LedgerKey{
-		Type: xdr.LedgerEntryTypeExpiration,
-		Expiration: &xdr.LedgerKeyExpiration{
+		Type: xdr.LedgerEntryTypeTtl,
+		Ttl: &xdr.LedgerKeyTtl{
 			KeyHash: sha256.Sum256(binKey),
 		},
 	}

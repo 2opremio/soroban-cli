@@ -24,9 +24,9 @@ type LedgerEntryReader interface {
 }
 
 type LedgerKeyAndEntry struct {
-	Key                 xdr.LedgerKey
-	Entry               xdr.LedgerEntry
-	ExpirationLedgerSeq *uint32 // optional expiration ledger seq, when applicable.
+	Key                xdr.LedgerKey
+	Entry              xdr.LedgerEntry
+	LiveUntilLedgerSeq *uint32 // optional live-until ledger seq, when applicable.
 }
 
 type LedgerEntryReadTx interface {
@@ -228,7 +228,7 @@ func GetLedgerEntry(tx LedgerEntryReadTx, key xdr.LedgerKey) (bool, xdr.LedgerEn
 		return false, xdr.LedgerEntry{}, nil, nil
 	case 1:
 		// expected length
-		return true, keyEntries[0].Entry, keyEntries[0].ExpirationLedgerSeq, nil
+		return true, keyEntries[0].Entry, keyEntries[0].LiveUntilLedgerSeq, nil
 	default:
 		return false, xdr.LedgerEntry{}, nil, fmt.Errorf("multiple entries (%d) for key %v", len(keyEntries), key)
 	}
@@ -314,8 +314,8 @@ func (l *ledgerEntryReadTx) GetLedgerEntries(keys ...xdr.LedgerKey) ([]LedgerKey
 		if err := xdr.SafeUnmarshal([]byte(encodedExpEntry), &expEntry); err != nil {
 			return nil, errors.Wrap(err, "cannot decode expiration ledger entry from DB")
 		}
-		expSeq := uint32(expEntry.Data.Expiration.ExpirationLedgerSeq)
-		result = append(result, LedgerKeyAndEntry{key, entry, &expSeq})
+		liveUntilSeq := uint32(expEntry.Data.Ttl.LiveUntilLedgerSeq)
+		result = append(result, LedgerKeyAndEntry{key, entry, &liveUntilSeq})
 	}
 
 	return result, nil

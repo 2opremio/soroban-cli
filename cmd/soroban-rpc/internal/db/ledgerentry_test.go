@@ -83,11 +83,11 @@ func TestGoldenPath(t *testing.T) {
 	ledgerSequence := uint32(23)
 	assert.NoError(t, tx.Commit(ledgerSequence))
 
-	present, obtainedEntry, obtainedLedgerSequence, expSeq := getLedgerEntryAndLatestLedgerSequence(t, db, key)
+	present, obtainedEntry, obtainedLedgerSequence, liveUntilSeq := getLedgerEntryAndLatestLedgerSequence(t, db, key)
 	assert.True(t, present)
 	assert.Equal(t, ledgerSequence, obtainedLedgerSequence)
-	require.NotNil(t, expSeq)
-	assert.Equal(t, uint32(expLegerEntry.Data.Expiration.ExpirationLedgerSeq), *expSeq)
+	require.NotNil(t, liveUntilSeq)
+	assert.Equal(t, uint32(expLegerEntry.Data.Ttl.LiveUntilLedgerSeq), *liveUntilSeq)
 	assert.Equal(t, obtainedEntry.Data.Type, xdr.LedgerEntryTypeContractData)
 	assert.Equal(t, xdr.Hash{0xca, 0xfe}, *obtainedEntry.Data.ContractData.Contract.ContractId)
 	assert.Equal(t, six, *obtainedEntry.Data.ContractData.Val.U32)
@@ -108,9 +108,9 @@ func TestGoldenPath(t *testing.T) {
 	ledgerSequence = uint32(24)
 	assert.NoError(t, tx.Commit(ledgerSequence))
 
-	present, obtainedEntry, obtainedLedgerSequence, expSeq = getLedgerEntryAndLatestLedgerSequence(t, db, key)
+	present, obtainedEntry, obtainedLedgerSequence, liveUntilSeq = getLedgerEntryAndLatestLedgerSequence(t, db, key)
 	assert.True(t, present)
-	require.NotNil(t, expSeq)
+	require.NotNil(t, liveUntilSeq)
 	assert.Equal(t, ledgerSequence, obtainedLedgerSequence)
 	assert.Equal(t, eight, *obtainedEntry.Data.ContractData.Val.U32)
 
@@ -124,9 +124,9 @@ func TestGoldenPath(t *testing.T) {
 	ledgerSequence = uint32(25)
 	assert.NoError(t, tx.Commit(ledgerSequence))
 
-	present, _, obtainedLedgerSequence, expSeq = getLedgerEntryAndLatestLedgerSequence(t, db, key)
+	present, _, obtainedLedgerSequence, liveUntilSeq = getLedgerEntryAndLatestLedgerSequence(t, db, key)
 	assert.False(t, present)
-	assert.Nil(t, expSeq)
+	assert.Nil(t, liveUntilSeq)
 	assert.Equal(t, ledgerSequence, obtainedLedgerSequence)
 
 	obtainedLedgerSequence, err = NewLedgerEntryReader(db).GetLatestLedgerSequence(context.Background())
@@ -194,9 +194,9 @@ func getContractDataLedgerEntry(t require.TestingT, data xdr.ContractDataEntry) 
 
 func getExpirationLedgerEntry(key xdr.LedgerKey) xdr.LedgerEntry {
 	var expLegerEntry xdr.LedgerEntry
-	expLegerEntry.Data.Expiration = &xdr.ExpirationEntry{
-		KeyHash:             key.Expiration.KeyHash,
-		ExpirationLedgerSeq: 100,
+	expLegerEntry.Data.Ttl = &xdr.TtlEntry{
+		KeyHash:            key.Ttl.KeyHash,
+		LiveUntilLedgerSeq: 100,
 	}
 	expLegerEntry.Data.Type = key.Type
 	return expLegerEntry

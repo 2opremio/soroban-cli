@@ -52,7 +52,7 @@ func NewGetLedgerEntryHandler(logger *log.Entry, ledgerEntryReader db.LedgerEntr
 			return GetLedgerEntryResponse{}, invalidLedgerKeyXdrError
 		}
 
-		if key.Type == xdr.LedgerEntryTypeExpiration {
+		if key.Type == xdr.LedgerEntryTypeTtl {
 			return GetLedgerEntryResponse{}, &jrpc2.Error{
 				Code:    jrpc2.InvalidParams,
 				Message: ErrLedgerExpirationEntriesCannotBeQueriedDirectly,

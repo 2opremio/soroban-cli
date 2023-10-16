@@ -159,7 +159,7 @@ func preflightTransactionParamsLocally(t *testing.T, params txnbuild.Transaction
 			auth = append(auth, a)
 		}
 		v.Auth = auth
-	case *txnbuild.BumpFootprintExpiration:
+	case *txnbuild.ExtendFootprintTtl:
 		require.Len(t, response.Results, 0)
 		v.Ext = xdr.TransactionExt{
 			V:           1,
@@ -236,7 +236,7 @@ func TestSimulateTransactionSucceeds(t *testing.T) {
 			ReadBytes:    48,
 			WriteBytes:   7048,
 		},
-		RefundableFee: 20056,
+		ResourceFee: 20056,
 	}
 
 	// First, decode and compare the transaction data so we get a decent diff if it fails.
@@ -247,7 +247,7 @@ func TestSimulateTransactionSucceeds(t *testing.T) {
 	assert.InDelta(t, uint32(expectedTransactionData.Resources.Instructions), uint32(transactionData.Resources.Instructions), 100000)
 	assert.InDelta(t, uint32(expectedTransactionData.Resources.ReadBytes), uint32(transactionData.Resources.ReadBytes), 10)
 	assert.InDelta(t, uint32(expectedTransactionData.Resources.WriteBytes), uint32(transactionData.Resources.WriteBytes), 100)
-	assert.InDelta(t, int64(expectedTransactionData.RefundableFee), int64(transactionData.RefundableFee), 1000)
+	assert.InDelta(t, int64(expectedTransactionData.ResourceFee), int64(transactionData.ResourceFee), 1000)
 
 	// Then decode and check the result xdr, separately so we get a decent diff if it fails.
 	assert.Len(t, result.Results, 1)
@@ -494,7 +494,7 @@ func TestSimulateInvokeContractTransactionSucceeds(t *testing.T) {
 	assert.Equal(t, xdr.Hash(contractHash), ro2.ContractCode.Hash)
 	assert.NoError(t, err)
 
-	assert.NotZero(t, obtainedTransactionData.RefundableFee)
+	assert.NotZero(t, obtainedTransactionData.ResourceFee)
 	assert.NotZero(t, obtainedTransactionData.Resources.Instructions)
 	assert.NotZero(t, obtainedTransactionData.Resources.ReadBytes)
 	assert.NotZero(t, obtainedTransactionData.Resources.WriteBytes)
@@ -756,8 +756,8 @@ func TestSimulateTransactionBumpAndRestoreFootprint(t *testing.T) {
 		SourceAccount:        &account,
 		IncrementSequenceNum: true,
 		Operations: []txnbuild.Operation{
-			&txnbuild.BumpFootprintExpiration{
-				LedgersToExpire: 20,
+			&txnbuild.ExtendFootprintTtl{
+				ExtendTo: 20,
 				Ext: xdr.TransactionExt{
 					V: 1,
 					SorobanData: &xdr.SorobanTransactionData{
@@ -923,7 +923,7 @@ func waitForLedgerEntryToExpire(t *testing.T, client *jrpc2.Client, ledgerKey xd
 		require.NoError(t, err)
 		require.NotEmpty(t, result.Entries)
 		require.NoError(t, xdr.SafeUnmarshalBase64(result.Entries[0].XDR, &entry))
-		require.NotEqual(t, xdr.LedgerEntryTypeExpiration, entry.Type)
+		require.NotEqual(t, xdr.LedgerEntryTypeTtl, entry.Type)
 		expirationLedgerSeq := xdr.Uint32(*result.Entries[0].ExpirationLedger)
 		// See https://soroban.stellar.org/docs/fundamentals-and-concepts/state-expiration#expiration-ledger
 		currentLedger := result.LatestLedger + 1
@@ -1159,7 +1159,7 @@ func TestSimulateSystemEvent(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.InDelta(t, 7260, uint32(transactionData.Resources.ReadBytes), 200)
-	assert.InDelta(t, 45, int64(transactionData.RefundableFee), 10)
+	assert.InDelta(t, 45, int64(transactionData.ResourceFee), 10)
 	assert.InDelta(t, 104, uint32(transactionData.Resources.WriteBytes), 15)
 	require.GreaterOrEqual(t, len(response.Events), 3)
 }

@@ -2,12 +2,12 @@ use sha2::Digest;
 use soroban_env_host::storage::SnapshotSource;
 use soroban_env_host::xdr::ContractDataDurability::{Persistent, Temporary};
 use soroban_env_host::xdr::{
-    ConfigSettingEntry, ConfigSettingId, Error as XdrError, ExpirationEntry, Hash, LedgerEntry,
-    LedgerEntryData, LedgerKey, LedgerKeyConfigSetting, LedgerKeyExpiration, ReadXdr, ScError,
-    ScErrorCode, WriteXdr,
+    ConfigSettingEntry, ConfigSettingId, Error as XdrError, Hash, LedgerEntry, LedgerEntryData,
+    LedgerKey, LedgerKeyConfigSetting, LedgerKeyTtl, ReadXdr, ScError, ScErrorCode, TtlEntry,
+    WriteXdr,
 };
 use soroban_env_host::HostError;
-use state_expiration::{get_restored_ledger_sequence, has_expired, ExpirableLedgerEntry};
+use state_ttl::{get_restored_ledger_sequence, is_live, TTLLedgerEntry};
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::convert::TryInto;
@@ -28,8 +28,8 @@ extern "C" {
 pub(crate) enum Error {
     #[error("not found")]
     NotFound,
-    #[error("entry expired")]
-    EntryExpired,
+    #[error("entry is not live")]
+    NotLive,
     #[error("xdr processing error: {0}")]
     Xdr(#[from] XdrError),
     #[error("nul error: {0}")]
@@ -45,9 +45,7 @@ pub(crate) enum Error {
 impl From<Error> for HostError {
     fn from(value: Error) -> Self {
         match value {
-            Error::NotFound | Error::EntryExpired => {
-                ScError::Storage(ScErrorCode::MissingValue).into()
-            }
+            Error::NotFound | Error::NotLive => ScError::Storage(ScErrorCode::MissingValue).into(),
             Error::Xdr(_) => ScError::Value(ScErrorCode::InvalidInput).into(),
             _ => ScError::Context(ScErrorCode::InternalError).into(),
         }
@@ -55,7 +53,7 @@ impl From<Error> for HostError {
 }
 
 struct EntryRestoreTracker {
-    min_persistent_entry_expiration: u32,
+    min_persistent_ttl: u32,
     // RefCell is needed to mutate the hashset inside SnapshotSource::get(), which is an immutable method
     ledger_keys_requiring_restore: RefCell<HashSet<LedgerKey>>,
 }
@@ -68,7 +66,7 @@ impl EntryRestoreTracker {
         key: &LedgerKey,
         entry_and_expiration: &(LedgerEntry, Option<u32>),
     ) -> Option<u32> {
-        let expirable_entry: Box<dyn ExpirableLedgerEntry> = match entry_and_expiration.try_into() {
+        let expirable_entry: Box<dyn TTLLedgerEntry> = match entry_and_expiration.try_into() {
             Ok(e) => e,
             Err(_) => {
                 // Nothing to track, the entry isn't expirable
@@ -76,18 +74,18 @@ impl EntryRestoreTracker {
             }
         };
         if expirable_entry.durability() != Persistent
-            || !expirable_entry.has_expired(current_ledger_sequence)
+            || expirable_entry.is_live(current_ledger_sequence)
         {
             // Nothing to track, the entry isn't persistent (and thus not restorable) or
-            // it hasn't expired
-            return Some(expirable_entry.expiration_ledger_seq());
+            // it is alive
+            return Some(expirable_entry.live_until_ledger_seq());
         }
         self.ledger_keys_requiring_restore
             .borrow_mut()
             .insert(key.clone());
         Some(get_restored_ledger_sequence(
             current_ledger_sequence,
-            self.min_persistent_entry_expiration,
+            self.min_persistent_ttl,
         ))
     }
 }
@@ -117,8 +115,8 @@ impl LedgerStorage {
             current_ledger_sequence,
             restore_tracker: None,
         };
-        let setting_id = ConfigSettingId::StateExpiration;
-        let ConfigSettingEntry::StateExpiration(state_expiration) =
+        let setting_id = ConfigSettingId::StateArchival;
+        let ConfigSettingEntry::StateArchival(state_archival) =
             ledger_storage.get_configuration_setting(setting_id)?
         else {
             return Err(Error::UnexpectedConfigLedgerEntry {
@@ -128,7 +126,7 @@ impl LedgerStorage {
         // Now that we have the state expiration config, we can build the tracker
         ledger_storage.restore_tracker = Some(EntryRestoreTracker {
             ledger_keys_requiring_restore: RefCell::new(HashSet::new()),
-            min_persistent_entry_expiration: state_expiration.min_persistent_entry_expiration,
+            min_persistent_ttl: state_archival.min_persistent_ttl,
         });
         Ok(ledger_storage)
     }
@@ -151,52 +149,56 @@ impl LedgerStorage {
     pub(crate) fn get(
         &self,
         key: &LedgerKey,
-        include_expired: bool,
+        include_not_live: bool,
     ) -> Result<(LedgerEntry, Option<u32>), Error> {
         let mut key_xdr = key.to_xdr()?;
         let xdr = self.get_xdr_internal(&mut key_xdr)?;
 
-        let expiration_seq = match key {
+        let live_until_ledger_seq = match key {
             // TODO: it would probably be more efficient to do all of this in the Go side
             //       (e.g. it would allow us to query multiple entries at once)
             LedgerKey::ContractData(_) | LedgerKey::ContractCode(_) => {
                 let key_hash: [u8; 32] = sha2::Sha256::digest(key_xdr).into();
-                let expiration_key = LedgerKey::Expiration(LedgerKeyExpiration {
+                let ttl_key = LedgerKey::Ttl(LedgerKeyTtl {
                     key_hash: Hash(key_hash),
                 });
-                let mut expiration_key_xdr = expiration_key.to_xdr()?;
-                let expiration_entry_xdr = self.get_xdr_internal(&mut expiration_key_xdr)?;
-                let expiration_entry = LedgerEntry::from_xdr(expiration_entry_xdr)?;
-                if let LedgerEntryData::Expiration(ExpirationEntry {
-                    expiration_ledger_seq,
+                let mut ttl_key_xdr = ttl_key.to_xdr()?;
+                let ttl_entry_xdr = self.get_xdr_internal(&mut ttl_key_xdr)?;
+                let ttl_entry = LedgerEntry::from_xdr(ttl_entry_xdr)?;
+                if let LedgerEntryData::Ttl(TtlEntry {
+                    live_until_ledger_seq,
                     ..
-                }) = expiration_entry.data
+                }) = ttl_entry.data
                 {
-                    Some(expiration_ledger_seq)
+                    Some(live_until_ledger_seq)
                 } else {
                     return Err(Error::UnexpectedLedgerEntryTypeForExpirationKey {
-                        ledger_entry_type: expiration_entry.data.name().to_string(),
+                        ledger_entry_type: ttl_entry.data.name().to_string(),
                     });
                 }
             }
             _ => None,
         };
 
-        if !include_expired
-            && expiration_seq.is_some()
-            && has_expired(expiration_seq.unwrap(), self.current_ledger_sequence)
+        if !include_not_live
+            && live_until_ledger_seq.is_some()
+            && !is_live(live_until_ledger_seq.unwrap(), self.current_ledger_sequence)
         {
-            return Err(Error::EntryExpired);
+            return Err(Error::NotLive);
         }
 
         let entry = LedgerEntry::from_xdr(xdr)?;
-        Ok((entry, expiration_seq))
+        Ok((entry, live_until_ledger_seq))
     }
 
-    pub(crate) fn get_xdr(&self, key: &LedgerKey, include_expired: bool) -> Result<Vec<u8>, Error> {
+    pub(crate) fn get_xdr(
+        &self,
+        key: &LedgerKey,
+        include_not_live: bool,
+    ) -> Result<Vec<u8>, Error> {
         // TODO: this can be optimized since for entry types other than ContractCode/ContractData,
         //       they don't need to be deserialized and serialized again
-        let (entry, _) = self.get(key, include_expired)?;
+        let (entry, _) = self.get(key, include_not_live)?;
         Ok(entry.to_xdr()?)
     }
 
@@ -235,12 +237,12 @@ impl SnapshotSource for LedgerStorage {
             let mut entry_and_expiration = self.get(key, true)?;
             // Explicitly discard temporary expired entries
             if let Ok(expirable_entry) =
-                TryInto::<Box<dyn ExpirableLedgerEntry>>::try_into(&entry_and_expiration)
+                TryInto::<Box<dyn TTLLedgerEntry>>::try_into(&entry_and_expiration)
             {
                 if expirable_entry.durability() == Temporary
-                    && expirable_entry.has_expired(self.current_ledger_sequence)
+                    && !expirable_entry.is_live(self.current_ledger_sequence)
                 {
-                    return Err(HostError::from(Error::EntryExpired));
+                    return Err(HostError::from(Error::NotLive));
                 }
             }
             // If the entry expired, we modify the expiration to make it seem like it was restored
